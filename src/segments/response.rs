@@ -400,6 +400,16 @@ pub(crate) fn extract_mt940_data(segments: &[RawSegment]) -> Mt940ExtractedData 
 ///
 /// The exact DEG layout varies by version and bank. We use a heuristic parser
 /// that handles the common structures from major German banks.
+/// Does any HIWPD carry a recognisable MT535 statement (its GENL block)?
+/// Tells an empty depot from a statement nobody could read.
+pub(crate) fn hiwpd_is_statement(segments: &[RawSegment]) -> bool {
+    segments
+        .iter()
+        .filter(|s| s.segment_type() == "HIWPD")
+        .flat_map(|s| (1..s.deg_count()).flat_map(move |i| s.deg(i).0.iter().filter_map(|de| de.as_bytes()).map(|b| b.to_vec()).collect::<Vec<_>>()))
+        .any(|b| crate::mt535::is_statement(&b))
+}
+
 pub(crate) fn parse_hiwpd(segments: &[RawSegment]) -> Vec<SecurityHolding> {
     let mut holdings = Vec::new();
 

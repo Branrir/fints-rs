@@ -60,6 +60,12 @@ fn tag_of(line: &str) -> Option<(&str, &str)> {
     ok.then(|| (tag, &rest[end + 1..]))
 }
 
+/// Is this an MT535 statement at all (it has the GENL block)? A statement
+/// with no FIN block is an empty depot, not an unreadable one.
+pub fn is_statement(bytes: &[u8]) -> bool {
+    bytes.windows(9).any(|w| w == b":16R:GENL")
+}
+
 pub fn parse_str(text: &str) -> Vec<SecurityHolding> {
     let mut holdings = Vec::new();
     let mut depot_id: Option<String> = None;
@@ -282,6 +288,13 @@ mod tests {
         let h = parse(b":16R:FIN\n:35B:ISIN XX0000000001\nX\n:90B::MRKT//ACTU/\xC9\xC9\n:19A::HOLD//\xC9\n:\xC9\xC9:x\n:16S:FIN");
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].price, None);
+    }
+
+    #[test]
+    fn a_statement_is_recognised_empty_or_not() {
+        assert!(is_statement(b":16R:GENL\n:16S:GENL\n-"));
+        assert!(is_statement(SAMPLE.as_bytes()));
+        assert!(!is_statement(b"garbage"));
     }
 
     #[test]

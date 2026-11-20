@@ -414,7 +414,6 @@ impl BankParams {
         }
     }
 
-    /// Does the given operation require TAN (per HIPINS)? Default: true (safe).
     /// What the bank's HIPINS says about `segment_type`: `Some(true)` needs a
     /// TAN, `Some(false)` PIN only, `None` not listed (a DK extension like
     /// DKKKU often is not). [`Self::needs_tan`] treats `None` as `true`.
@@ -422,8 +421,10 @@ impl BankParams {
         self.operation_tan_required.get(segment_type).copied()
     }
 
+    /// Does the given operation require TAN (per HIPINS)? Not listed counts
+    /// as yes (safe for a bank that requires one; see [`Self::tan_rule`]).
     pub fn needs_tan(&self, segment_type: &SegmentType) -> bool {
-        self.operation_tan_required.get(segment_type).copied().unwrap_or(true)
+        self.tan_rule(segment_type).unwrap_or(true)
     }
 
     /// HKTAN version for the selected TAN method.
@@ -564,12 +565,13 @@ impl<S: std::fmt::Debug> Dialog<S> {
             segments, &self.params,
         )?;
 
-        let msg_str = String::from_utf8_lossy(&msg_bytes);
-        let redacted = msg_str.replace(self.pin.as_str(), "***PIN***");
-        // Cut on a char boundary: the message is ISO 8859-1 read as UTF-8, so
-        // a non-ASCII byte became a 3-byte U+FFFD and a byte cut could split it.
-        let shown: String = redacted.chars().take(OUTGOING_LOG_CHARS).collect();
-        info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), shown);
+        if tracing::enabled!(tracing::Level::INFO) {
+            let msg_str = String::from_utf8_lossy(&msg_bytes);
+            // Cut on a char boundary: the message is ISO 8859-1 read as UTF-8,
+            // so a non-ASCII byte became a 3-byte U+FFFD a byte cut could split.
+            let shown: String = redact_signature(&msg_str).chars().take(OUTGOING_LOG_CHARS).collect();
+            info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), shown);
+        }
 
         self.message_number += 1;
         let response_bytes = self.connection.send(&msg_bytes).await?;
@@ -829,6 +831,39 @@ impl Account {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Typed business operation results
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// A message for the log with its signature closing (HNSHA, which carries
+/// the PIN and a TAN) replaced whole. Structural, not a search for the PIN:
+/// a PIN that also occurs in an account number or a date must not mark it.
+fn redact_signature(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut rest = msg;
+    while let Some(at) = rest.find("HNSHA:") {
+        out.push_str(&rest[..at]);
+        out.push_str("HNSHA:***");
+        rest = match rest[at..].find('\'') {
+            Some(end) => &rest[at + end..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_signature;
+
+    #[test]
+    fn only_the_signature_is_redacted() {
+        let msg = "HKSAL:3:5+20050550::280:20050550+N'HNSHA:4:2+123++20050'HNHBN:5:1+1'";
+        assert_eq!(
+            redact_signature(msg),
+            "HKSAL:3:5+20050550::280:20050550+N'HNSHA:***'HNHBN:5:1+1'"
+        );
+        assert_eq!(redact_signature("HNSHA:4:2+1++12345"), "HNSHA:***");
+    }
+}
 
 /// The longest outgoing message prefix logged, in characters.
 const OUTGOING_LOG_CHARS: usize = 4000;
@@ -1116,8 +1151,9 @@ impl Dialog<Open> {
         if holdings.is_empty() && td.is_none() {
             // A depot statement that was sent but not understood is not an
             // empty depot: hand it back raw so the caller can say so.
+            // A well-formed statement with no positions is an empty depot.
             let raw = raw_segments(&response, "HIWPD");
-            if !raw.is_empty() {
+            if !raw.is_empty() && !hiwpd_is_statement(&response.segments) {
                 return Ok(HoldingsResult::Unreadable(raw));
             }
             return Ok(HoldingsResult::Empty);
