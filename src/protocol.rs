@@ -116,6 +116,9 @@ pub(crate) enum Segment {
 pub(crate) fn kti_for(account: &Account, params: &BankParams) -> crate::segments::builder::Kti {
     use crate::segments::builder::Kti;
     let kti = Kti::new(account.iban(), account.bic());
+    if let Some((number, sub, blz)) = account.national_parts() {
+        return kti.with_national(number, sub, blz);
+    }
     let iban = account.iban();
     if let Some(a) = params.accounts_from_upd.iter().rev().find(|a| {
         a.iban.as_str().eq_ignore_ascii_case(iban) && !a.account_number.is_empty()
@@ -757,6 +760,9 @@ impl Dialog<Synced> {
 pub struct Account {
     iban: Iban,
     bic: Bic,
+    /// Account number, sub-account, BLZ — for accounts without an IBAN
+    /// (a securities depot) or to override the UPD lookup.
+    national: Option<(String, String, String)>,
 }
 
 impl Account {
@@ -768,7 +774,29 @@ impl Account {
         if bic.is_empty() {
             return Err(FinTSError::Dialog("BIC must not be empty. Please set the BIC in the account settings.".into()));
         }
-        Ok(Self { iban: Iban::new(iban), bic: Bic::new(bic) })
+        Ok(Self { iban: Iban::new(iban), bic: Bic::new(bic), national: None })
+    }
+
+    /// An account known only by its national identification — a securities
+    /// depot or a savings plan often has no IBAN. Below version 7 the request
+    /// carries `account:sub-account:280:BLZ`; at version 7 a KTI without IBAN.
+    pub fn national(account_number: &str, sub_account: &str, blz: &str, bic: &str) -> Result<Self> {
+        if account_number.is_empty() || blz.is_empty() {
+            return Err(FinTSError::Dialog("account number and BLZ must not be empty".into()));
+        }
+        if bic.is_empty() {
+            return Err(FinTSError::Dialog("BIC must not be empty. Please set the BIC in the account settings.".into()));
+        }
+        Ok(Self {
+            iban: Iban::new(""),
+            bic: Bic::new(bic),
+            national: Some((account_number.into(), sub_account.into(), blz.into())),
+        })
+    }
+
+    /// The account's national part, when it was built with [`Account::national`].
+    pub fn national_parts(&self) -> Option<(&str, &str, &str)> {
+        self.national.as_ref().map(|(n, s, b)| (n.as_str(), s.as_str(), b.as_str()))
     }
 
     pub fn iban(&self) -> &str { self.iban.as_str() }

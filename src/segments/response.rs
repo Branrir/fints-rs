@@ -408,6 +408,19 @@ pub(crate) fn parse_hiwpd(segments: &[RawSegment]) -> Vec<SecurityHolding> {
             continue;
         }
 
+        // The spec's layout: the depot statement is an MT535 document in a
+        // binary data element. Parse that when it is there; the field
+        // heuristics below are for banks that send positions as DEGs.
+        let mt535: Vec<&[u8]> = (1..seg.deg_count())
+            .flat_map(|i| seg.deg(i).0.iter().filter_map(|de| de.as_bytes()).collect::<Vec<_>>())
+            .collect();
+        if !mt535.is_empty() {
+            for bytes in mt535 {
+                holdings.extend(crate::mt535::parse(bytes));
+            }
+            continue;
+        }
+
         // Skip header (DEG0) and account (DEG1), positions start at DEG2+
         for i in 2..seg.deg_count() {
             let d = seg.deg(i);

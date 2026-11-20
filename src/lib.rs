@@ -54,6 +54,7 @@ pub(crate) mod segments;
 pub(crate) mod serializer;
 pub(crate) mod transport;
 pub mod types;
+pub mod mt535;
 
 // ── Tooling ──
 pub mod debug;

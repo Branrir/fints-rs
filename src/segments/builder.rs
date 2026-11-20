@@ -41,7 +41,6 @@ impl Kti {
     /// # Panics
     /// Panics if `iban` or `bic` is empty — these are programming errors, not runtime conditions.
     pub(crate) fn new(iban: &str, bic: &str) -> Self {
-        assert!(!iban.is_empty(), "IBAN must not be empty in KTI DEG");
         assert!(
             !bic.is_empty(),
             "BIC must not be empty in KTI DEG — use the bank's BIC as fallback"
@@ -637,6 +636,15 @@ mod tests {
     }
 
     #[test]
+    fn a_depot_without_iban() {
+        let kti = Kti::new("", "HASPDEHHXXX").with_national("7654321", "", "20050550");
+        let v6 = String::from_utf8(serialize_segment(&hkwpd(3, 6, &kti, None, None)).unwrap()).unwrap();
+        assert_eq!(v6, "HKWPD:3:6+7654321::280:20050550'");
+        let v7 = String::from_utf8(serialize_segment(&hksal(3, 7, &kti, None)).unwrap()).unwrap();
+        assert_eq!(v7, "HKSAL:3:7+:HASPDEHHXXX:7654321::280:20050550+N'");
+    }
+
+    #[test]
     fn hksal_v5_and_v6_send_the_national_account() {
         for v in [5, 6] {
             let wire = String::from_utf8(serialize_segment(&hksal(3, v, &haspa_kti(), None)).unwrap()).unwrap();
@@ -723,12 +731,6 @@ mod tests {
             wire,
             "HKWPD:3:7+DE04120300001084174299:BYLADEM1001++++TOUCH123'"
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "IBAN must not be empty")]
-    fn kti_panics_on_empty_iban() {
-        Kti::new("", "BYLADEM1001");
     }
 
     #[test]
