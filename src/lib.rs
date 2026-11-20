@@ -84,7 +84,7 @@ pub use protocol::{
     Dialog, Response, TanChallenge, BankParams, Account,
     New, Synced, Open, TanPending,
     InitResult, SendResult, PollResult,
-    BalanceResult, TransactionResult, TransactionPage,
+    BalanceResult, TransactionResult, TransactionPage, CardStatementResult, CardStatementPage,
     HoldingsResult, HoldingsPage,
 };
 

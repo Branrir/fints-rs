@@ -98,6 +98,14 @@ pub(crate) enum Segment {
         currency: Option<Currency>,
         touchdown: Option<TouchdownPoint>,
     },
+    /// DKKKU: Kreditkartenumsätze (credit-card statement, a DK extension)
+    CreditCardTransactions {
+        account: Account,
+        card_number: String,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        touchdown: Option<TouchdownPoint>,
+    },
     /// HKTAN process 4: initiate TAN for a referenced segment
     TanProcess4 { reference_seg: SegmentRef, tan_medium: Option<TanMediumName> },
     /// HKTAN process S: poll decoupled TAN status
@@ -157,6 +165,10 @@ impl Segment {
             Segment::Holdings { account, currency, touchdown } => {
                 let version = params.supported_version("HIWPDS", 7).max(1);
                 hkwpd(0, version, &kti_for(account, params), currency.as_ref().map(|c| c.as_str()), touchdown.as_ref().map(|t| t.as_str()))
+            }
+            Segment::CreditCardTransactions { account, card_number, start_date, end_date, touchdown } => {
+                let version = params.supported_version("DIKKUS", 2).max(2);
+                dkkku(0, version, &kti_for(account, params), card_number, *start_date, *end_date, touchdown.as_ref().map(|t| t.as_str()))
             }
             Segment::TanProcess4 { reference_seg, tan_medium } => {
                 let version = params.hktan_version();
@@ -807,6 +819,23 @@ impl Account {
 // Typed business operation results
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Result of a credit-card statement request (DKKKU).
+pub enum CardStatementResult {
+    Success(CardStatementPage),
+    /// Bank requires TAN for this operation.
+    NeedTan(TanChallenge),
+}
+
+/// One page of a credit-card statement: every DIKKU segment as its data
+/// element groups (index 0 is the segment header), each a list of data
+/// elements as text (binary ones decoded as ISO 8859-1).
+#[derive(Debug, Clone)]
+pub struct CardStatementPage {
+    pub segments: Vec<Vec<Vec<String>>>,
+    /// If Some, more data is available — ask again with this value.
+    pub touchdown: Option<TouchdownPoint>,
+}
+
 /// Result of a balance request.
 pub enum BalanceResult {
     /// Balance retrieved successfully.
@@ -1032,6 +1061,77 @@ impl Dialog<Open> {
         Ok(HoldingsResult::Success(HoldingsPage {
             holdings,
             touchdown: td,
+        }))
+    }
+
+    /// Request a credit card's statement (DKKKU, a Deutsche Kreditwirtschaft
+    /// extension — not core FinTS; Sparkassen use it for their cards).
+    ///
+    /// `account` is the card's own account from the UPD (usually without
+    /// IBAN: [`Account::national`] with the card number as account number),
+    /// `card_number` the card number. The reply (DIKKU) has no published
+    /// layout, so it is returned raw — every DIKKU segment as data element
+    /// groups of strings — for the caller to read; see [`CardStatementPage`].
+    pub async fn credit_card_transactions(
+        &mut self,
+        account: &Account,
+        card_number: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        touchdown: Option<&TouchdownPoint>,
+    ) -> Result<CardStatementResult> {
+        let is_first = touchdown.is_none();
+        let dkkku = SegmentType::new("DKKKU");
+        let needs_tan = self.params.needs_tan(&dkkku);
+        let mut segments = vec![Segment::CreditCardTransactions {
+            account: account.clone(),
+            card_number: card_number.to_string(),
+            start_date,
+            end_date,
+            touchdown: touchdown.cloned(),
+        }];
+        if is_first && needs_tan {
+            info!("[FinTS] card statement: DKKKU + HKTAN:4 (HIPINS: TAN required)");
+            segments.push(Segment::TanProcess4 {
+                reference_seg: SegmentRef::new("DKKKU"),
+                tan_medium: self.params.selected_tan_medium.clone(),
+            });
+        }
+
+        let response = self.send_segments(&segments).await?;
+        for c in response.all_codes() {
+            if c.is_error() || c.is_warning() {
+                info!("[FinTS] DKKKU: {} - {}", c.code(), c.text);
+            }
+        }
+        if response.needs_tan() && !response.has_sca_exemption() {
+            if let Some(challenge) = response.get_tan_challenge() {
+                return Ok(CardStatementResult::NeedTan(challenge));
+            }
+        }
+        response.check_errors()?;
+
+        let segments = response
+            .find_segments("DIKKU")
+            .into_iter()
+            .map(|seg| {
+                (0..seg.deg_count())
+                    .map(|i| {
+                        seg.deg(i)
+                            .0
+                            .iter()
+                            .map(|de| match de.as_bytes() {
+                                Some(b) => b.iter().map(|&c| c as char).collect(),
+                                None => de.as_str().map(str::to_string).unwrap_or_default(),
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(CardStatementResult::Success(CardStatementPage {
+            segments,
+            touchdown: response.touchdown(),
         }))
     }
 

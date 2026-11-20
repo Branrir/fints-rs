@@ -540,6 +540,35 @@ pub(crate) fn hkkaz(
     degs
 }
 
+// ---- DKKKU (Kreditkartenumsätze anfordern) - Credit-Card Statement, version 2 ----
+
+/// Build DKKKU (a DK extension, not core FinTS; field order as python-fints'
+/// reverse-engineered DKKKU2): card account (KTV), card number, sub-account
+/// (empty), start date, end date, max entries (empty), touchdown.
+pub(crate) fn dkkku(
+    segment_number: u16,
+    version: u16,
+    kti: &Kti,
+    card_number: &str,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    touchdown: Option<&str>,
+) -> Vec<DEG> {
+    let mut degs = vec![
+        seg_header("DKKKU", segment_number, version),
+        kti.to_ktv_deg(),
+        deg1(de_text(card_number)),
+        deg1(de_empty()),
+        deg1(de_date(start_date)),
+        deg1(de_date(end_date)),
+    ];
+    if let Some(td) = touchdown {
+        degs.push(deg1(de_empty()));
+        degs.push(deg1(de_text(td)));
+    }
+    degs
+}
+
 // ---- HKWPD (Wertpapierdepotaufstellung) - Securities Holdings Request, version 1-7 ----
 
 /// Build HKWPD to request the securities depot listing for a SEPA account.
@@ -633,6 +662,17 @@ mod tests {
 
     fn haspa_kti() -> Kti {
         Kti::new("DE89200505501234567890", "HASPDEHHXXX").with_national("1234567890", "", "20050550")
+    }
+
+    #[test]
+    fn dkkku_v2_wire_format() {
+        let kti = Kti::new("", "HASPDEHHXXX").with_national("5232000000001234", "", "20050550");
+        let d1 = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        let d2 = chrono::NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let wire = String::from_utf8(serialize_segment(&dkkku(3, 2, &kti, "5232000000001234", d1, d2, None)).unwrap()).unwrap();
+        assert_eq!(wire, "DKKKU:3:2+5232000000001234::280:20050550+5232000000001234++20261021+20261120'");
+        let paged = String::from_utf8(serialize_segment(&dkkku(3, 2, &kti, "5232000000001234", d1, d2, Some("TD1"))).unwrap()).unwrap();
+        assert_eq!(paged, "DKKKU:3:2+5232000000001234::280:20050550+5232000000001234++20261021+20261120++TD1'");
     }
 
     #[test]
