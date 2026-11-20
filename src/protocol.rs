@@ -1072,6 +1072,10 @@ impl Dialog<Open> {
     /// `card_number` the card number. The reply (DIKKU) has no published
     /// layout, so it is returned raw — every DIKKU segment as data element
     /// groups of strings — for the caller to read; see [`CardStatementPage`].
+    ///
+    /// `attach_tan`: `None` follows the bank's rules (HIPINS) for bundling
+    /// HKTAN:4; `Some(false)` sends DKKKU alone, `Some(true)` always bundles.
+    /// Banks differ here for this extension.
     pub async fn credit_card_transactions(
         &mut self,
         account: &Account,
@@ -1079,10 +1083,11 @@ impl Dialog<Open> {
         start_date: NaiveDate,
         end_date: NaiveDate,
         touchdown: Option<&TouchdownPoint>,
+        attach_tan: Option<bool>,
     ) -> Result<CardStatementResult> {
         let is_first = touchdown.is_none();
         let dkkku = SegmentType::new("DKKKU");
-        let needs_tan = self.params.needs_tan(&dkkku);
+        let needs_tan = attach_tan.unwrap_or_else(|| self.params.needs_tan(&dkkku));
         let mut segments = vec![Segment::CreditCardTransactions {
             account: account.clone(),
             card_number: card_number.to_string(),
