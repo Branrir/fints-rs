@@ -19,15 +19,20 @@ use crate::types::*;
 ///   4. Unterkontomerkmal (sub-account feature, optional)
 ///   5. Kreditinstitutskennung (bank identifier DEG: country_code:blz, optional)
 ///
-/// All fields except IBAN and BIC are optional. When using SEPA accounts,
-/// only IBAN and BIC are populated — the serializer strips trailing empties,
-/// so the wire format is simply `IBAN:BIC`.
+/// All fields except IBAN and BIC are optional. Without the national part
+/// the serializer strips trailing empties, so the wire format is `IBAN:BIC`.
+/// Some banks (Sparkassen, e.g. Hamburger Sparkasse) reject that for HKSAL
+/// and HKKAZ ("9010 Ungültige Kontonummer"); they need the national part as
+/// well: `IBAN:BIC:account:sub-account:280:BLZ`. See [`Kti::with_national`].
 ///
 /// Using a struct instead of a raw `Vec<DataElement>` ensures the field order
 /// and presence are correct at compile time.
-struct Kti {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Kti {
     iban: String,
     bic: String,
+    /// Account number, sub-account and BLZ (country code 280), when known.
+    national: Option<(String, String, String)>,
 }
 
 impl Kti {
@@ -35,7 +40,7 @@ impl Kti {
     ///
     /// # Panics
     /// Panics if `iban` or `bic` is empty — these are programming errors, not runtime conditions.
-    fn new(iban: &str, bic: &str) -> Self {
+    pub(crate) fn new(iban: &str, bic: &str) -> Self {
         assert!(!iban.is_empty(), "IBAN must not be empty in KTI DEG");
         assert!(
             !bic.is_empty(),
@@ -44,19 +49,41 @@ impl Kti {
         Self {
             iban: iban.to_string(),
             bic: bic.to_string(),
+            national: None,
         }
     }
 
-    /// Serialize into a DEG: `IBAN:BIC`.
-    ///
-    /// Only IBAN and BIC are populated. The remaining optional fields
-    /// (account_number, sub-account, bank_identifier) are omitted — the
-    /// serializer strips trailing empties automatically.
+    /// Add the national part (account number, sub-account, German BLZ).
+    /// An empty account number or BLZ leaves the KTI as `IBAN:BIC`.
+    pub(crate) fn with_national(mut self, account_number: &str, sub_account: &str, blz: &str) -> Self {
+        if !account_number.is_empty() && !blz.is_empty() {
+            self.national = Some((account_number.into(), sub_account.into(), blz.into()));
+        }
+        self
+    }
+
+    pub(crate) fn iban(&self) -> &str {
+        &self.iban
+    }
+
+    pub(crate) fn bic(&self) -> &str {
+        &self.bic
+    }
+
+    /// Serialize into a DEG: `IBAN:BIC`, or
+    /// `IBAN:BIC:account:sub-account:280:BLZ` with the national part.
     fn to_deg(&self) -> DEG {
-        deg(vec![
+        let mut des = vec![
             DataElement::Text(self.iban.clone()),
             DataElement::Text(self.bic.clone()),
-        ])
+        ];
+        if let Some((number, sub, blz)) = &self.national {
+            des.push(DataElement::Text(number.clone()));
+            des.push(if sub.is_empty() { de_empty() } else { DataElement::Text(sub.clone()) });
+            des.push(de_text("280"));
+            des.push(DataElement::Text(blz.clone()));
+        }
+        deg(des)
     }
 }
 
@@ -441,15 +468,15 @@ pub(crate) fn hkspa(segment_number: u16, version: u16) -> Vec<DEG> {
 pub(crate) fn hksal(
     segment_number: u16,
     version: u16,
-    iban: &str,
-    bic: &str,
+    kti: &Kti,
     touchdown: Option<&str>,
 ) -> Vec<DEG> {
+    let (iban, bic) = (kti.iban(), kti.bic());
     let mut degs = if version >= 6 {
         // Version 6+: international account (KTI)
         vec![
             seg_header("HKSAL", segment_number, version),
-            Kti::new(iban, bic).to_deg(),
+            kti.to_deg(),
             deg1(de_text("N")),
         ]
     } else {
@@ -482,16 +509,16 @@ pub(crate) fn hksal(
 pub(crate) fn hkkaz(
     segment_number: u16,
     version: u16,
-    iban: &str,
-    bic: &str,
+    kti: &Kti,
     start_date: NaiveDate,
     end_date: NaiveDate,
     touchdown: Option<&str>,
 ) -> Vec<DEG> {
+    let (iban, bic) = (kti.iban(), kti.bic());
     let mut degs = if version >= 6 {
         vec![
             seg_header("HKKAZ", segment_number, version),
-            Kti::new(iban, bic).to_deg(),
+            kti.to_deg(),
             deg1(de_text("N")),
             deg1(de_date(start_date)),
             deg1(de_date(end_date)),
@@ -538,16 +565,16 @@ pub(crate) fn hkkaz(
 pub(crate) fn hkwpd(
     segment_number: u16,
     version: u16,
-    iban: &str,
-    bic: &str,
+    kti: &Kti,
     currency: Option<&str>,
     touchdown: Option<&str>,
 ) -> Vec<DEG> {
+    let (iban, bic) = (kti.iban(), kti.bic());
     let mut degs = if version >= 6 {
         // Version 6+: international account (KTI)
         vec![
             seg_header("HKWPD", segment_number, version),
-            Kti::new(iban, bic).to_deg(),
+            kti.to_deg(),
         ]
     } else {
         // Older versions: national account format
@@ -608,8 +635,31 @@ mod tests {
     }
 
     #[test]
+    fn kti_with_national_part() {
+        let kti = Kti::new("DE89200505501234567890", "HASPDEHHXXX")
+            .with_national("1234567890", "", "20050550");
+        let wire = String::from_utf8(serialize_deg(&kti.to_deg()).unwrap()).unwrap();
+        assert_eq!(wire, "DE89200505501234567890:HASPDEHHXXX:1234567890::280:20050550");
+    }
+
+    #[test]
+    fn kti_without_account_number_stays_iban_bic() {
+        let kti = Kti::new("DE89200505501234567890", "HASPDEHHXXX").with_national("", "", "20050550");
+        let wire = String::from_utf8(serialize_deg(&kti.to_deg()).unwrap()).unwrap();
+        assert_eq!(wire, "DE89200505501234567890:HASPDEHHXXX");
+    }
+
+    #[test]
+    fn hksal_v7_with_national_part() {
+        let kti = Kti::new("DE89200505501234567890", "HASPDEHHXXX")
+            .with_national("1234567890", "", "20050550");
+        let wire = String::from_utf8(serialize_segment(&hksal(3, 7, &kti, None)).unwrap()).unwrap();
+        assert_eq!(wire, "HKSAL:3:7+DE89200505501234567890:HASPDEHHXXX:1234567890::280:20050550+N'");
+    }
+
+    #[test]
     fn hksal_v7_wire_format() {
-        let degs = hksal(3, 7, "DE04120300001084174299", "BYLADEM1001", None);
+        let degs = hksal(3, 7, &Kti::new("DE04120300001084174299", "BYLADEM1001"), None);
         let bytes = serialize_segment(&degs).unwrap();
         let wire = String::from_utf8(bytes).unwrap();
         assert_eq!(wire, "HKSAL:3:7+DE04120300001084174299:BYLADEM1001+N'");
@@ -622,8 +672,7 @@ mod tests {
         let degs = hkkaz(
             3,
             7,
-            "DE04120300001084174299",
-            "BYLADEM1001",
+            &Kti::new("DE04120300001084174299", "BYLADEM1001"),
             start,
             end,
             None,
@@ -638,7 +687,7 @@ mod tests {
 
     #[test]
     fn hkwpd_v7_wire_format() {
-        let degs = hkwpd(3, 7, "DE04120300001084174299", "BYLADEM1001", None, None);
+        let degs = hkwpd(3, 7, &Kti::new("DE04120300001084174299", "BYLADEM1001"), None, None);
         let bytes = serialize_segment(&degs).unwrap();
         let wire = String::from_utf8(bytes).unwrap();
         assert_eq!(wire, "HKWPD:3:7+DE04120300001084174299:BYLADEM1001'");
@@ -649,8 +698,7 @@ mod tests {
         let degs = hkwpd(
             3,
             7,
-            "DE04120300001084174299",
-            "BYLADEM1001",
+            &Kti::new("DE04120300001084174299", "BYLADEM1001"),
             Some("EUR"),
             None,
         );
@@ -664,8 +712,7 @@ mod tests {
         let degs = hkwpd(
             3,
             7,
-            "DE04120300001084174299",
-            "BYLADEM1001",
+            &Kti::new("DE04120300001084174299", "BYLADEM1001"),
             None,
             Some("TOUCH123"),
         );
