@@ -278,11 +278,7 @@ impl BankOps for Dkb {
         let (synced, _resp) = sync_dialog.sync().await?;
         let (sync_params, sys_id) = synced.end().await?;
 
-        let sys_id = if sys_id.is_assigned() {
-            sys_id
-        } else {
-            system_id.cloned().unwrap_or_else(SystemId::unassigned)
-        };
+        let sys_id = pick_system_id(system_id, sys_id);
 
         // ── Phase 2: Normal dialog init (triggers TAN or opens directly) ──
         let dialog = self.new_dialog(username, pin, product_id)?
@@ -377,8 +373,7 @@ impl BankOps for GenericBank {
         let (synced, _) = sync_dialog.sync().await?;
         let (sync_params, sys_id) = synced.end().await?;
 
-        let sys_id = if sys_id.is_assigned() { sys_id }
-            else { system_id.cloned().unwrap_or_else(SystemId::unassigned) };
+        let sys_id = pick_system_id(system_id, sys_id);
 
         let dialog = self.new_dialog(username, pin, product_id)?
             .with_system_id(&sys_id)
@@ -665,4 +660,43 @@ fn parse_mt940(data: &[u8], status: TransactionStatus) -> Result<Vec<Transaction
         }
     }
     Ok(transactions)
+}
+
+/// The system id for the real dialog after a sync. A known (assigned) id the
+/// caller passed in wins over the one the sync dialog just handed out: HKSYN
+/// mode 0 makes the bank issue a NEW id on every sync, and banks tie their
+/// SCA exemption ("Ihr Gerät wurde erfolgreich als vertrauenswürdig
+/// gespeichert") to the id. Using the fresh one would make every login a new,
+/// untrusted device and ask for a TAN each time.
+fn pick_system_id(known: Option<&SystemId>, synced: SystemId) -> SystemId {
+    match known {
+        Some(k) if k.is_assigned() => k.clone(),
+        _ if synced.is_assigned() => synced,
+        _ => SystemId::unassigned(),
+    }
+}
+
+#[cfg(test)]
+mod system_id_tests {
+    use super::*;
+
+    #[test]
+    fn a_known_system_id_is_kept_over_the_synced_one() {
+        let known = SystemId::new("KNOWN123");
+        assert_eq!(pick_system_id(Some(&known), SystemId::new("FRESH456")).as_str(), "KNOWN123");
+    }
+
+    #[test]
+    fn the_synced_id_is_used_when_none_is_known() {
+        assert_eq!(pick_system_id(None, SystemId::new("FRESH456")).as_str(), "FRESH456");
+        assert_eq!(
+            pick_system_id(Some(&SystemId::unassigned()), SystemId::new("FRESH456")).as_str(),
+            "FRESH456"
+        );
+    }
+
+    #[test]
+    fn nothing_assigned_stays_unassigned() {
+        assert!(!pick_system_id(None, SystemId::unassigned()).is_assigned());
+    }
 }

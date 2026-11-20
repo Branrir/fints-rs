@@ -108,6 +108,27 @@ pub(crate) enum Segment {
     End { dialog_id: DialogId },
 }
 
+/// The KTI for an account: IBAN and BIC, plus the national part (account
+/// number, sub-account, BLZ) that some banks require — Sparkassen answer an
+/// `IBAN:BIC`-only KTI with "9010 Ungültige Kontonummer". Taken from the
+/// bank's own account list (UPD) when it lists this IBAN, else derived from a
+/// German IBAN (BLZ and account number are part of it).
+pub(crate) fn kti_for(account: &Account, params: &BankParams) -> crate::segments::builder::Kti {
+    use crate::segments::builder::Kti;
+    let kti = Kti::new(account.iban(), account.bic());
+    let iban = account.iban();
+    if let Some(a) = params.accounts_from_upd.iter().rev().find(|a| {
+        a.iban.as_str().eq_ignore_ascii_case(iban) && !a.account_number.is_empty()
+    }) {
+        return kti.with_national(&a.account_number, &a.sub_account, a.blz.as_str());
+    }
+    if iban.len() == 22 && iban.starts_with("DE") && iban.is_ascii() {
+        let number = iban[12..].trim_start_matches('0');
+        return kti.with_national(number, "", &iban[4..12]);
+    }
+    kti
+}
+
 impl Segment {
     /// Convert to raw DEGs using bank parameters for version selection.
     pub(crate) fn to_degs(&self, params: &BankParams) -> Vec<DEG> {
@@ -124,15 +145,15 @@ impl Segment {
             }
             Segment::Balance { account } => {
                 let version = params.supported_version("HISALS", 7).max(5);
-                hksal(0, version, account.iban(), account.bic(), None)
+                hksal(0, version, &kti_for(account, params), None)
             }
             Segment::Transactions { account, start_date, end_date, touchdown } => {
                 let version = params.supported_version("HIKAZS", 7).max(5);
-                hkkaz(0, version, account.iban(), account.bic(), *start_date, *end_date, touchdown.as_ref().map(|t| t.as_str()))
+                hkkaz(0, version, &kti_for(account, params), *start_date, *end_date, touchdown.as_ref().map(|t| t.as_str()))
             }
             Segment::Holdings { account, currency, touchdown } => {
                 let version = params.supported_version("HIWPDS", 7).max(1);
-                hkwpd(0, version, account.iban(), account.bic(), currency.as_ref().map(|c| c.as_str()), touchdown.as_ref().map(|t| t.as_str()))
+                hkwpd(0, version, &kti_for(account, params), currency.as_ref().map(|c| c.as_str()), touchdown.as_ref().map(|t| t.as_str()))
             }
             Segment::TanProcess4 { reference_seg, tan_medium } => {
                 let version = params.hktan_version();
