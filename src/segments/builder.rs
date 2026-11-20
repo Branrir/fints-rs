@@ -70,6 +70,26 @@ impl Kti {
         &self.bic
     }
 
+    /// The national account (KTV, versions 5 and 6 of HKSAL/HKKAZ/HKWPD):
+    /// `account:sub-account:280:BLZ`. Without a national part this falls
+    /// back to `IBAN::280:BIC`, which only lenient banks accept.
+    fn to_ktv_deg(&self) -> DEG {
+        match &self.national {
+            Some((number, sub, blz)) => deg(vec![
+                DataElement::Text(number.clone()),
+                if sub.is_empty() { de_empty() } else { DataElement::Text(sub.clone()) },
+                de_text("280"),
+                DataElement::Text(blz.clone()),
+            ]),
+            None => deg(vec![
+                DataElement::Text(self.iban.clone()),
+                de_empty(),
+                de_text("280"),
+                DataElement::Text(self.bic.clone()),
+            ]),
+        }
+    }
+
     /// Serialize into a DEG: `IBAN:BIC`, or
     /// `IBAN:BIC:account:sub-account:280:BLZ` with the national part.
     fn to_deg(&self) -> DEG {
@@ -471,27 +491,13 @@ pub(crate) fn hksal(
     kti: &Kti,
     touchdown: Option<&str>,
 ) -> Vec<DEG> {
-    let (iban, bic) = (kti.iban(), kti.bic());
-    let mut degs = if version >= 6 {
-        // Version 6+: international account (KTI)
-        vec![
-            seg_header("HKSAL", segment_number, version),
-            kti.to_deg(),
-            deg1(de_text("N")),
-        ]
-    } else {
-        // Version 5: national account format (KTO)
-        vec![
-            seg_header("HKSAL", segment_number, version),
-            deg(vec![
-                de_text(iban),
-                de_empty(),
-                de_text("280"),
-                de_text(bic),
-            ]),
-            deg1(de_text("N")),
-        ]
-    };
+    // Version 7: international account (KTI); 5 and 6: national (KTV).
+    let account = if version >= 7 { kti.to_deg() } else { kti.to_ktv_deg() };
+    let mut degs = vec![
+        seg_header("HKSAL", segment_number, version),
+        account,
+        deg1(de_text("N")),
+    ];
 
     // Max entries (optional)
     degs.push(deg1(de_empty()));
@@ -514,30 +520,15 @@ pub(crate) fn hkkaz(
     end_date: NaiveDate,
     touchdown: Option<&str>,
 ) -> Vec<DEG> {
-    let (iban, bic) = (kti.iban(), kti.bic());
-    let mut degs = if version >= 6 {
-        vec![
-            seg_header("HKKAZ", segment_number, version),
-            kti.to_deg(),
-            deg1(de_text("N")),
-            deg1(de_date(start_date)),
-            deg1(de_date(end_date)),
-        ]
-    } else {
-        // Version 5
-        vec![
-            seg_header("HKKAZ", segment_number, version),
-            deg(vec![
-                de_text(iban),
-                de_empty(),
-                de_text("280"),
-                de_text(bic),
-            ]),
-            deg1(de_text("N")),
-            deg1(de_date(start_date)),
-            deg1(de_date(end_date)),
-        ]
-    };
+    // Version 7: international account (KTI); 5 and 6: national (KTV).
+    let account = if version >= 7 { kti.to_deg() } else { kti.to_ktv_deg() };
+    let mut degs = vec![
+        seg_header("HKKAZ", segment_number, version),
+        account,
+        deg1(de_text("N")),
+        deg1(de_date(start_date)),
+        deg1(de_date(end_date)),
+    ];
 
     // Max entries
     degs.push(deg1(de_empty()));
@@ -569,25 +560,9 @@ pub(crate) fn hkwpd(
     currency: Option<&str>,
     touchdown: Option<&str>,
 ) -> Vec<DEG> {
-    let (iban, bic) = (kti.iban(), kti.bic());
-    let mut degs = if version >= 6 {
-        // Version 6+: international account (KTI)
-        vec![
-            seg_header("HKWPD", segment_number, version),
-            kti.to_deg(),
-        ]
-    } else {
-        // Older versions: national account format
-        vec![
-            seg_header("HKWPD", segment_number, version),
-            deg(vec![
-                de_text(iban),
-                de_empty(),
-                de_text("280"),
-                de_text(bic),
-            ]),
-        ]
-    };
+    // Version 7: international account (KTI); older: national (KTV).
+    let account = if version >= 7 { kti.to_deg() } else { kti.to_ktv_deg() };
+    let mut degs = vec![seg_header("HKWPD", segment_number, version), account];
 
     // Currency (optional)
     degs.push(deg1(if let Some(cur) = currency {
@@ -655,6 +630,31 @@ mod tests {
             .with_national("1234567890", "", "20050550");
         let wire = String::from_utf8(serialize_segment(&hksal(3, 7, &kti, None)).unwrap()).unwrap();
         assert_eq!(wire, "HKSAL:3:7+DE89200505501234567890:HASPDEHHXXX:1234567890::280:20050550+N'");
+    }
+
+    fn haspa_kti() -> Kti {
+        Kti::new("DE89200505501234567890", "HASPDEHHXXX").with_national("1234567890", "", "20050550")
+    }
+
+    #[test]
+    fn hksal_v5_and_v6_send_the_national_account() {
+        for v in [5, 6] {
+            let wire = String::from_utf8(serialize_segment(&hksal(3, v, &haspa_kti(), None)).unwrap()).unwrap();
+            assert_eq!(wire, format!("HKSAL:3:{v}+1234567890::280:20050550+N'"));
+        }
+    }
+
+    #[test]
+    fn hkkaz_v5_sends_the_national_account() {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let wire = String::from_utf8(serialize_segment(&hkkaz(3, 5, &haspa_kti(), d, d, None)).unwrap()).unwrap();
+        assert_eq!(wire, "HKKAZ:3:5+1234567890::280:20050550+N+20261101+20261101'");
+    }
+
+    #[test]
+    fn hkwpd_v6_sends_the_national_account() {
+        let wire = String::from_utf8(serialize_segment(&hkwpd(3, 6, &haspa_kti(), None, None)).unwrap()).unwrap();
+        assert_eq!(wire, "HKWPD:3:6+1234567890::280:20050550'");
     }
 
     #[test]
