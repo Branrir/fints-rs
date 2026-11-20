@@ -329,6 +329,10 @@ impl BankOps for Dkb {
                     info!("[DKB] No holdings data (depot may be empty or not supported)");
                     break;
                 }
+                HoldingsResult::Unreadable(raw) => {
+                    warn!("[DKB] {} HIWPD segment(s) with no readable position", raw.len());
+                    break;
+                }
                 HoldingsResult::Success(page) => {
                     info!("[DKB] Got {} holdings", page.holdings.len());
                     all_holdings.extend(page.holdings);

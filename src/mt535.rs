@@ -53,9 +53,10 @@ fn tag_of(line: &str) -> Option<(&str, &str)> {
     let rest = line.strip_prefix(':')?;
     let end = rest.find(':')?;
     let tag = &rest[..end];
-    let ok = (tag.len() == 2 || tag.len() == 3)
-        && tag[..2].bytes().all(|b| b.is_ascii_digit())
-        && tag[2..].bytes().all(|b| b.is_ascii_uppercase());
+    let b = tag.as_bytes();
+    let ok = (b.len() == 2 || b.len() == 3)
+        && b[..2].iter().all(u8::is_ascii_digit)
+        && b[2..].iter().all(u8::is_ascii_uppercase);
     ok.then(|| (tag, &rest[end + 1..]))
 }
 
@@ -198,10 +199,12 @@ fn read_35b(h: &mut SecurityHolding, v: &str) {
 
 /// `EUR12,345` → (`Some("EUR")`, `"12,345"`); a bare number has no currency.
 fn split_currency(s: &str) -> (Option<&str>, &str) {
-    if s.len() > 3 && s[..3].bytes().all(|b| b.is_ascii_uppercase()) {
-        (Some(&s[..3]), &s[3..])
-    } else {
-        (None, s)
+    // `get` rather than a byte slice: Latin-1 text may hold multi-byte chars.
+    match (s.get(..3), s.get(3..)) {
+        (Some(cur), Some(rest)) if !rest.is_empty() && cur.bytes().all(|b| b.is_ascii_uppercase()) => {
+            (Some(cur), rest)
+        }
+        _ => (None, s),
     }
 }
 
@@ -271,6 +274,14 @@ mod tests {
         bytes.push(0xDC); // Ü in ISO 8859-1
         bytes.extend_from_slice(b"NCHENER RE\n:16S:FIN");
         assert_eq!(parse(&bytes)[0].name, "MÜNCHENER RE");
+    }
+
+    #[test]
+    fn multibyte_text_does_not_panic() {
+        // "É" decodes to a 2-byte char: every slice must stay on a boundary.
+        let h = parse(b":16R:FIN\n:35B:ISIN XX0000000001\nX\n:90B::MRKT//ACTU/\xC9\xC9\n:19A::HOLD//\xC9\n:\xC9\xC9:x\n:16S:FIN");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].price, None);
     }
 
     #[test]

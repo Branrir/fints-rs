@@ -167,8 +167,9 @@ impl Segment {
                 hkwpd(0, version, &kti_for(account, params), currency.as_ref().map(|c| c.as_str()), touchdown.as_ref().map(|t| t.as_str()))
             }
             Segment::CreditCardTransactions { account, card_number, start_date, end_date, touchdown } => {
-                let version = params.supported_version("DIKKUS", 2).max(2);
-                dkkku(0, version, &kti_for(account, params), card_number, *start_date, *end_date, touchdown.as_ref().map(|t| t.as_str()))
+                // The builder knows only version 2's layout (python-fints'
+                // reverse-engineered DKKKU2), so that is what is sent.
+                dkkku(0, 2, &kti_for(account, params), card_number, *start_date, *end_date, touchdown.as_ref().map(|t| t.as_str()))
             }
             Segment::TanProcess4 { reference_seg, tan_medium } => {
                 let version = params.hktan_version();
@@ -414,6 +415,13 @@ impl BankParams {
     }
 
     /// Does the given operation require TAN (per HIPINS)? Default: true (safe).
+    /// What the bank's HIPINS says about `segment_type`: `Some(true)` needs a
+    /// TAN, `Some(false)` PIN only, `None` not listed (a DK extension like
+    /// DKKKU often is not). [`Self::needs_tan`] treats `None` as `true`.
+    pub fn tan_rule(&self, segment_type: &SegmentType) -> Option<bool> {
+        self.operation_tan_required.get(segment_type).copied()
+    }
+
     pub fn needs_tan(&self, segment_type: &SegmentType) -> bool {
         self.operation_tan_required.get(segment_type).copied().unwrap_or(true)
     }
@@ -558,7 +566,10 @@ impl<S: std::fmt::Debug> Dialog<S> {
 
         let msg_str = String::from_utf8_lossy(&msg_bytes);
         let redacted = msg_str.replace(self.pin.as_str(), "***PIN***");
-        info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), &redacted[..redacted.len().min(500)]);
+        // Cut on a char boundary: the message is ISO 8859-1 read as UTF-8, so
+        // a non-ASCII byte became a 3-byte U+FFFD and a byte cut could split it.
+        let shown: String = redacted.chars().take(OUTGOING_LOG_CHARS).collect();
+        info!("[FinTS] Outgoing ({} bytes): {}", msg_bytes.len(), shown);
 
         self.message_number += 1;
         let response_bytes = self.connection.send(&msg_bytes).await?;
@@ -819,6 +830,32 @@ impl Account {
 // Typed business operation results
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// The longest outgoing message prefix logged, in characters.
+const OUTGOING_LOG_CHARS: usize = 4000;
+
+/// Every `seg_type` segment of a response as data element groups of text
+/// (index 0 is the header; binary elements decoded as ISO 8859-1).
+fn raw_segments(response: &Response, seg_type: &str) -> Vec<Vec<Vec<String>>> {
+    response
+        .find_segments(seg_type)
+        .into_iter()
+        .map(|seg| {
+            (0..seg.deg_count())
+                .map(|i| {
+                    seg.deg(i)
+                        .0
+                        .iter()
+                        .map(|de| match de.as_bytes() {
+                            Some(b) => b.iter().map(|&c| c as char).collect(),
+                            None => de.as_str().map(str::to_string).unwrap_or_default(),
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Result of a credit-card statement request (DKKKU).
 pub enum CardStatementResult {
     Success(CardStatementPage),
@@ -880,6 +917,9 @@ pub enum HoldingsResult {
     NeedTan(TanChallenge),
     /// No holdings data in response (depot may be empty or segment not supported).
     Empty,
+    /// HIWPD was sent but no position could be read from it: the raw
+    /// segments, as in [`CardStatementPage::segments`].
+    Unreadable(Vec<Vec<Vec<String>>>),
 }
 
 // ── Dialog<Open> ─────────────────────────────────────────────────────────────
@@ -891,8 +931,15 @@ impl Dialog<Open> {
     /// Automatically selects the correct HKSAL version from BPD and bundles
     /// HKTAN:4 when HIPINS says TAN is required for this operation.
     pub async fn balance(&mut self, account: &Account) -> Result<BalanceResult> {
+        self.balance_with(account, None).await
+    }
+
+    /// [`Self::balance`] with the HKTAN bundling chosen by the caller: `None`
+    /// follows HIPINS, `Some(false)` sends HKSAL alone, `Some(true)` always
+    /// bundles HKTAN:4.
+    pub async fn balance_with(&mut self, account: &Account, attach_tan: Option<bool>) -> Result<BalanceResult> {
         let hksal = SegmentType::new("HKSAL");
-        let needs_tan = self.params.needs_tan(&hksal);
+        let needs_tan = attach_tan.unwrap_or_else(|| self.params.needs_tan(&hksal));
         let mut segments = vec![
             Segment::Balance { account: account.clone() },
         ];
@@ -1010,9 +1057,21 @@ impl Dialog<Open> {
         currency: Option<&Currency>,
         touchdown: Option<&TouchdownPoint>,
     ) -> Result<HoldingsResult> {
+        self.holdings_with(account, currency, touchdown, None).await
+    }
+
+    /// [`Self::holdings`] with the HKTAN bundling chosen by the caller (see
+    /// [`Self::balance_with`]).
+    pub async fn holdings_with(
+        &mut self,
+        account: &Account,
+        currency: Option<&Currency>,
+        touchdown: Option<&TouchdownPoint>,
+        attach_tan: Option<bool>,
+    ) -> Result<HoldingsResult> {
         let is_first = touchdown.is_none();
         let hkwpd = SegmentType::new("HKWPD");
-        let needs_tan = self.params.needs_tan(&hkwpd);
+        let needs_tan = attach_tan.unwrap_or_else(|| self.params.needs_tan(&hkwpd));
 
         let mut segments = vec![
             Segment::Holdings {
@@ -1055,6 +1114,12 @@ impl Dialog<Open> {
         let td = response.touchdown();
 
         if holdings.is_empty() && td.is_none() {
+            // A depot statement that was sent but not understood is not an
+            // empty depot: hand it back raw so the caller can say so.
+            let raw = raw_segments(&response, "HIWPD");
+            if !raw.is_empty() {
+                return Ok(HoldingsResult::Unreadable(raw));
+            }
             return Ok(HoldingsResult::Empty);
         }
 
@@ -1116,26 +1181,8 @@ impl Dialog<Open> {
         }
         response.check_errors()?;
 
-        let segments = response
-            .find_segments("DIKKU")
-            .into_iter()
-            .map(|seg| {
-                (0..seg.deg_count())
-                    .map(|i| {
-                        seg.deg(i)
-                            .0
-                            .iter()
-                            .map(|de| match de.as_bytes() {
-                                Some(b) => b.iter().map(|&c| c as char).collect(),
-                                None => de.as_str().map(str::to_string).unwrap_or_default(),
-                            })
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect();
         Ok(CardStatementResult::Success(CardStatementPage {
-            segments,
+            segments: raw_segments(&response, "DIKKU"),
             touchdown: response.touchdown(),
         }))
     }

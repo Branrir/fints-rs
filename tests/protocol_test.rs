@@ -452,6 +452,9 @@ fn _type_test_holdings_result(result: fints::HoldingsResult) {
         fints::HoldingsResult::Empty => {
             // Empty depot or unsupported
         }
+        fints::HoldingsResult::Unreadable(raw) => {
+            let _: Vec<Vec<Vec<String>>> = raw;
+        }
     }
 }
 

@@ -92,10 +92,13 @@ impl Kti {
     /// Serialize into a DEG: `IBAN:BIC`, or
     /// `IBAN:BIC:account:sub-account:280:BLZ` with the national part.
     fn to_deg(&self) -> DEG {
-        let mut des = vec![
-            DataElement::Text(self.iban.clone()),
-            DataElement::Text(self.bic.clone()),
-        ];
+        // An account without an IBAN (a depot) is named by its national part
+        // alone: a BIC without an IBAN is not a valid KTI.
+        let (iban, bic) = match self.iban.is_empty() {
+            true => (de_empty(), de_empty()),
+            false => (DataElement::Text(self.iban.clone()), DataElement::Text(self.bic.clone())),
+        };
+        let mut des = vec![iban, bic];
         if let Some((number, sub, blz)) = &self.national {
             des.push(DataElement::Text(number.clone()));
             des.push(if sub.is_empty() { de_empty() } else { DataElement::Text(sub.clone()) });
@@ -681,7 +684,7 @@ mod tests {
         let v6 = String::from_utf8(serialize_segment(&hkwpd(3, 6, &kti, None, None)).unwrap()).unwrap();
         assert_eq!(v6, "HKWPD:3:6+7654321::280:20050550'");
         let v7 = String::from_utf8(serialize_segment(&hksal(3, 7, &kti, None)).unwrap()).unwrap();
-        assert_eq!(v7, "HKSAL:3:7+:HASPDEHHXXX:7654321::280:20050550+N'");
+        assert_eq!(v7, "HKSAL:3:7+::7654321::280:20050550+N'");
     }
 
     #[test]
